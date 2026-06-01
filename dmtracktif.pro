@@ -105,7 +105,22 @@
 ; 5->fate
 ; 6->life
 ; 7-12->6 neighbors given by time index
-function dmtracktif,fname,directory,collect=collect,xdim=xdim,ydim=ydim,brek=brek,combin=combin,conec=conec,ddrops=ddrops,contacttim=contacttim,ddropcheck=ddropcheck,antoine=antoine,maxdisp=maxdisp,mov=mov,nochug=nochug,bglst=bglst,interface=interface,coal=coal,newptedge=newptedge,nnn=nnn
+
+;keywords
+;If keyword format is not specified, it takes the value 1 to turn on.
+;antoine - looks in antoines directory instead of davids
+;coal - looks in davids coalescence directory
+;collect - if dmcollectedge was run in the same session, turn this on
+;maxdisp - sets the max displacement from its default of 50 to something else
+;gross - if there's a gross region with dirt/hair that messed up the image processing, you can get rid of it by specifying a [x,y] position here
+;crrrct - if frames are dropping, put the individual frames before the drop [t1,t2,t3,t4,t5...] here
+;nochug - certain subroutines are very expensive and are not always needed
+;interface - if you are running the edge tracking, turn this on
+;ddropcheck - adds an additional layer of precision to the daughter droplet checks
+
+function dmtracktif,fname,directory,collect=collect,xdim=xdim,ydim=ydim,brek=brek,combin=combin,conec=conec,ddrops=ddrops,contacttim=contacttim,ddropcheck=ddropcheck,antoine=antoine,maxdisp=maxdisp,mov=mov,nochug=nochug,bglst=bglst,interface=interface,coal=coal,newptedge=newptedge,nnn=nnn,crrrct=crrrct
+
+;telling the program where to look for the pre-tracked data files
 	if keyword_set(antoine) then direc='/data/antoine/'
 	if keyword_set(coal) then direc='/data/david/coal/'+directory+'/'
 	if (keyword_set(collect) EQ 0) then begin &$
@@ -116,13 +131,16 @@ function dmtracktif,fname,directory,collect=collect,xdim=xdim,ydim=ydim,brek=bre
 	endif else begin &$
 		ptdata=collect &$
 	endelse
+
+;rearranging the data temporarily to put mass as column 2, so we can track x,y,mass as a 3D track.
+;We will later undo this step
 	ptdata1=ptdata([0:40],*)
 	ptdata1(2,*)=ptdata(4,*)/4.0
 	ptdata1(4,*)=ptdata(40,*)
 	ptdata1(40,*)=ptdata(2,*)
 	
+;pt2 explicitly tracks only the droplets on the edges of the sample
 	pt2=ptdata1(*,where(ptdata1(12,*) EQ 1))
-
 	maxt=max(pt2(-1,*),min=mint)
 	if maxt EQ mint then maxt=maxt+1
 	nx=n_elements(pt2(*,0))
@@ -135,6 +153,8 @@ function dmtracktif,fname,directory,collect=collect,xdim=xdim,ydim=ydim,brek=bre
 	s=sort(pt3(-1,*))
 	pt3=pt3(*,s)
 	if maxt EQ mint+1 then pt3(-1)=pt3(-1)+1
+
+;actually running the tracking
 	if NOT keyword_set(maxdisp) then begin &$
 		maxdisp=50 &$
 		maxdisp1=35 &$
@@ -142,8 +162,9 @@ function dmtracktif,fname,directory,collect=collect,xdim=xdim,ydim=ydim,brek=bre
 		maxdisp1=maxdisp/2 &$
 	endelse &$
 	datae=track(pt3,maxdisp1,mem=1,good=1,/quiet)
-
 	data1=track(ptdata1,maxdisp,mem=1,good=0,dim=3,/quiet)
+
+;reset the mass and put it back in position
 	data2=data1
 	data3=datae
 	data2(2,*)=data1(40,*)
@@ -152,6 +173,8 @@ function dmtracktif,fname,directory,collect=collect,xdim=xdim,ydim=ydim,brek=bre
 	data3(2,*)=datae(40,*)
 	data3(4,*)=datae(2,*)*4.0
 	data3(40,*)=datae(4,*)
+
+;this loop switches together the two arrays, the edgeflag=1 tracking (without mass) and the edgeflag=0 (with mass).
 	leeway=12
 	data2=data2(*,where(data2(12,*) EQ 0))
 	for i=0,max(data3(41,*)) do begin &$
@@ -181,12 +204,16 @@ function dmtracktif,fname,directory,collect=collect,xdim=xdim,ydim=ydim,brek=bre
 		data2=data4 &$
 		if keyword_set(antoine) then print,[(i+0.0)/max(data3(41,*)),1] &$
 	endfor
+
+;read in the original image processed file for later
 	mov=read_gdf(direc+'pt'+fname+'gdf')
 	b=size(mov)
 	xdim=b(1)
 	ydim=b(2)
 	tdim=b(3)
 	data2=data2(*,where((data2(0,*) GE 0) AND (data2(0,*) LE xdim) AND (data2(1,*) GE 0) AND (data2(1,*) LE ydim)))
+
+;load in the obstacle array for the data
 	sr=FILE_SEARCH(direc+fname+'obs',count=countobs)
 	if (countobs GT 0) then begin &$
 		obs=float(readtext(direc+fname+'obs')) &$
@@ -224,21 +251,36 @@ function dmtracktif,fname,directory,collect=collect,xdim=xdim,ydim=ydim,brek=bre
 			obsr=[0] &$
 		endelse &$
 	endelse
-	if NOT keyword_set(gross) then gross=[520,145]
+
+; make a new data array that is long enough to store all the information we need
 	data2=data2(*,where(data2(2,*) LT tdim))
 	lng=length(transpose(data2(0,*)))
 	numblob=max(data2(41,*))
 	data=replicate(!Values.F_NAN,90,lng)
 	data([0:41],*)=data2
+
+;find the droplets with neighbors
 	hasneigh=where(data(13,*) GT 0)
-	data(9,*)=1-abs(2*(data(9,*)-0.5))
-	data(10,*)=1-abs(2*(data(10,*)-0.5))
-	data(68,*)=sqrt(data(4,*)/!PI)
+
+;	data(9,*)=1-abs(2*(data(9,*)-0.5))
+;	data(10,*)=1-abs(2*(data(10,*)-0.5))
+
+;if there's some grossness like dirt in the image, you can ignore the droplets that pass through that region
+	if NOT keyword_set(gross) then gross=[520,145]
 	data(67,where(sqrt((data(0,*)-gross(0))^2+(data(1,*)-gross(1))^2) LT data(68,*)+5))=1
 	data(67,where(sqrt((data(0,*)-gross(0))^2+(data(1,*)-gross(1))^2) GE data(68,*)+5))=0
+
+;find droplet effective radius
+        data(68,*)=sqrt(data(4,*)/!PI)
+
+;this lets us define droplets being "thin"
 	data(66,where(data(26,*)/data(68,*) LT 1))=1
 	data(66,where(data(66,*) NE 1))=0
+
 ;	tdim=max(data(2,*))+1
+
+
+;put in experimental measurements
 	pix2m=pix2um/1000000.0
 	data(60,*)=data(40,*)*FPS/tdim
 	data(61,*)=data(4,*)*pix2m^2
@@ -246,19 +288,34 @@ function dmtracktif,fname,directory,collect=collect,xdim=xdim,ydim=ydim,brek=bre
 	surftens=11.2*10.0^(-3)
 	dens=0.96*10.0^(3)
 	dvisc=visc*dens
+
+;this lets us put in some realspace numbers
+	data(60,*)=data(40,*)*FPS/tdim
+	data(61,*)=data(4,*)*pix2m^2
+
+; to view the tracked images, you can display them as images at a specific time with information overlaid
 ;t=0
 ;tv,bytscl(mov(*,*,t))
 ;cgtext,data(0,where(data(2,*) EQ t))-87,data(1,where(data(2,*) EQ t)),string(round(data(41,where(data(2,*) EQ t)))),/device,charthick=2,color=[500000]
 ;cgtext,data(0,where(data(2,*) EQ t)),data(1,where(data(2,*) EQ t)),'.',/device,charthick=2,color=[500000]
+
+;or play them as a movie with this program I wrote
 ;dmmov2,mov,data(0,*),data(1,*),data(2,*),data(41,*)
+
+
+;find the closest obstacle to a droplet at any given time
 	for i=0,lng-1 do begin &$
 		dstemp=sqrt((xobs-data(0,i))^2+(yobs-data(1,i))^2) &$
 		data(70,i)=where(dstemp EQ min(dstemp)) &$
 	end
+
+;if instead you wanted to display an mp4 version, you can do so with this
 ;mova=dmreadmp4('/home/dameer/micro/videos/'+fname+'.mp4')
 ;t=0
 ;tv,mova(0,*,*,t)
 ;cgtext,xobs-95,yobs,string([0:length(xobs)-1]),/device,charthick=2,color=[500000]
+
+;populate variables 50-55
 	for i=0,length(hasneigh)-1 do begin &$
 		tim=data(2,hasneigh(i)) &$
 		if data(13,hasneigh(i)) EQ 1 then begin &$
@@ -273,6 +330,8 @@ function dmtracktif,fname,directory,collect=collect,xdim=xdim,ydim=ydim,brek=bre
 		endelse &$
 		if keyword_set(antoine) then print,[(i+0.0)/length(hasneigh),2] &$
 	endfor
+
+;create the birth and death arrays where droplets appear and disappear, as well as collecting dynamic variables like 63/64
 	brth=[]
 	deth=[]
 	for i=0,numblob do begin &$
@@ -339,40 +398,48 @@ function dmtracktif,fname,directory,collect=collect,xdim=xdim,ydim=ydim,brek=bre
 		endelse &$
 		if keyword_set(antoine) then print,[(i+0.0)/numblob,3] &$
 	end
+
+;find the velocity angles, which requires an annoying bit of trigonometry
 	wdirec=where(data(43,*) LT 0)
 	data(71,*)=acos(data(42,*)/data(44,*))
 	data(71,wdirec)=2*!PI-acos(data(42,wdirec)/data(44,wdirec))
 	data(71,where(data(71,*) GT !pi))=data(71,where(data(71,*) GT !pi))-2*!PI
+
+;smooth out the velocity angles
 	for i=0,numblob do begin &$
 		locs=where(data(41,*) EQ i) &$
 		if locs(0) NE -1 then locs=locs(sort(data(2,locs))) &$
 		chck=where(data(71,locs) GT -10) &$
 		if length(chck) GT 2 then data(72,locs)=smooth(data(71,locs),3,/edge_zero,/NaN) &$
 	end
+
 ;all the values i need to fix because of dropped frames
-	crrct=[42,43,44,62,69]
-	tlst=[]
-	for i=1,tdim-2 do begin &$
-		m1=mean(data(44,where((data(2,*) EQ i) AND (data(44,*) GE 0)))) &$
-		m2=mean(data(44,where((data(2,*) EQ i+1) AND (data(44,*) GE 0)))) &$
-		m0=mean(data(44,where((data(2,*) EQ i-1) AND (data(44,*) GE 0)))) &$
-		if m1/[(m0+m2)/2.0] GT 1.6 then tlst=[tlst,i] &$
-	end
-	for i=0,numblob do begin &$
-		locs=where(data(41,*) EQ i) &$
-		if locs(0) NE -1 then locs=locs(sort(data(2,locs))) &$
-		for j=0,length(tlst)-1 do begin &$
-			ttemp=where(data(2,locs) EQ tlst(j)) &$
-			ttemp1=where(data(2,locs) EQ tlst(j)-1) &$
-			ttemp2=where(data(2,locs) EQ tlst(j)+1) &$
-			if (ttemp(0) NE -1) AND (ttemp1(0) NE -1) AND (ttemp2(0) NE -1) then begin &$
-				for k=0,length(crrct)-1 do begin &$
-					data(crrct(k),locs(ttemp))=mean([transpose(data(crrct(k),locs(ttemp1))),transpose(data(crrct(k),locs(ttemp2)))]) &$
-				endfor &$
-			endif &$
+;	crrct=[42,43,44,62,69]
+	if keyword_set(crrrct) then begin &$
+		tlst=[] &$
+		for i=1,tdim-2 do begin &$
+			m1=mean(data(44,where((data(2,*) EQ i) AND (data(44,*) GE 0)))) &$
+			m2=mean(data(44,where((data(2,*) EQ i+1) AND (data(44,*) GE 0)))) &$
+			m0=mean(data(44,where((data(2,*) EQ i-1) AND (data(44,*) GE 0)))) &$
+			if m1/[(m0+m2)/2.0] GT 1.6 then tlst=[tlst,i] &$
 		end &$
-		if keyword_set(antoine) then print,[(i+0.0)/numblob,4] &$
-	end
+		for i=0,numblob do begin &$
+			locs=where(data(41,*) EQ i) &$
+			if locs(0) NE -1 then locs=locs(sort(data(2,locs))) &$
+			for j=0,length(tlst)-1 do begin &$
+				ttemp=where(data(2,locs) EQ tlst(j)) &$
+				ttemp1=where(data(2,locs) EQ tlst(j)-1) &$
+				ttemp2=where(data(2,locs) EQ tlst(j)+1) &$
+				if (ttemp(0) NE -1) AND (ttemp1(0) NE -1) AND (ttemp2(0) NE -1) then begin &$
+					for k=0,length(crrct)-1 do begin &$
+						data(crrct(k),locs(ttemp))=mean([transpose(data(crrct(k),locs(ttemp1))),transpose(data(crrct(k),locs(ttemp2)))]) &$
+					endfor &$
+				endif &$
+			end &$
+			if keyword_set(antoine) then print,[(i+0.0)/numblob,4] &$
+		end &$
+	endif
+
 ;smooth out the final velocities
 	for i=0,numblob do begin &$
 		locs=where(data(41,*) EQ i) &$
@@ -386,8 +453,9 @@ function dmtracktif,fname,directory,collect=collect,xdim=xdim,ydim=ydim,brek=bre
 		endif &$
 		if keyword_set(antoine) then print,[(i+0.0)/numblob,5] &$
 	end
-;symemtry parameter based on velocity angle
-;while I'm digging around in there, the nearest upstream neighbor too
+
+;symmetry parameter based on velocity angle, and the nearest upstream neighbor. Generally this loop is chunky because I'm re-loading in the
+;image processed file, and using some dynamic variables along with the pixel positions of droplets to find new measurements
 	if NOT keyword_set(nochug) then begin &$
 		for i=0,numblob do begin &$
 			locs=where(data(41,*) EQ i) &$
@@ -518,8 +586,10 @@ function dmtracktif,fname,directory,collect=collect,xdim=xdim,ydim=ydim,brek=bre
 			endif &$
 		endfor &$
 	endif
+
 ;begin breakup and combination detection. index 6 is 0 if clean, and 1 if disturbed
 	combin=dmcombtif(brth,deth,tdim,xdim,obsr,data)
+
 ;write in code for if combin=empty set
 	if length(combin) EQ 0 then begin &$
 		combin=replicate(!values.f_nan,8,1) &$
@@ -529,6 +599,8 @@ function dmtracktif,fname,directory,collect=collect,xdim=xdim,ydim=ydim,brek=bre
 		tempb=where(combin(6,*) EQ 5) &$
 		tempc=where(combin(6,*) EQ 4) &$
 	endelse
+
+;start finding the daughter droplets and their properties
 	ddrops=[]
 	if tempb(0) NE -1 then begin &$
 		brek=combin(*,where(combin(6,*) EQ 5)) &$
@@ -607,6 +679,8 @@ OR (data(39,*) EQ data(70,*))))) &$
 	endif else begin &$
 		combin=replicate(!values.f_nan,7,1) &$
 	endelse
+
+;adding coalescence and breakup to fate parameters
 	for i=0,numblob do begin &$
 		if tempc(0) NE -1 then begin &$
 			tmpcc=where(((combin(1,*) EQ i) OR (combin(2,*) EQ i))) &$
@@ -617,6 +691,7 @@ OR (data(39,*) EQ data(70,*))))) &$
 			if tmpbb(0) GT -1 then data(45,where(data(41,*) EQ i))=4 &$
 		endif &$
 	endfor
+
 ;create the ancestor network
 	ancestry=replicate(-10,33,length(transpose(combin)))
 	if combin(0) GT -1 then begin &$
@@ -703,6 +778,9 @@ OR (data(39,*) EQ data(70,*))))) &$
 			endfor &$
 		endfor &$
 		sr=FILE_SEARCH(direc+fname+'ptedge',count=count) &$
+
+;BEGIN TRACKING THE INTERFACES
+
 ;0 -> x-com position
 ;1 -> y-com position
 ;2 -> time
@@ -889,6 +967,7 @@ OR (data(39,*) EQ data(70,*))))) &$
 			endif &$
 		endif &$
 	endif
+;dmmov3 shows droplet breakup and coalescence
 ;dmmov3,mov,data(0,*),data(1,*),data(2,*),data(41,*),brek,combin
 ;dmmov5,mov,data(0,*),data(1,*),data(2,*),data(28,*),data(29,*),data(30,*),data(31,*),data(41,*)
 	return,data
